@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/mattn/godown"
+	"github.com/wormi4ok/godown"
 )
 
 var (

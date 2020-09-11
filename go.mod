@@ -1,4 +1,4 @@
-module github.com/mattn/godown
+module github.com/wormi4ok/godown
 
 go 1.15
 
