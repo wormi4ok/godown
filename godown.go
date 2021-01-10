@@ -206,7 +206,7 @@ func pre(node *html.Node, w io.Writer, option *Option) {
 
 func walk(node *html.Node, w io.Writer, nest int, option *Option) {
 	if node.Type == html.TextNode {
-		if strings.TrimSpace(node.Data) != "" {
+		if strings.TrimSpace(node.Data) != "" || node.Data == " " {
 			text := regexp.MustCompile(`[[:space:]][[:space:]]*`).ReplaceAllString(strings.Trim(node.Data, "\t\r\n"), " ")
 			fmt.Fprint(w, text)
 		}
