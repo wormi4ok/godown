@@ -6,11 +6,27 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/mattn/go-runewidth"
 
 	"golang.org/x/net/html"
 )
+
+// A regex to escape certain characters
+// \ : since this is the excape character, become weird if printed literally
+// * : Used to start bullet lists, and as a delimiter
+// _ : Used as a delimiter
+// ( and ) : Used in links and images
+// [ and ] : Used in links and images
+// < : can be used to mean "raw HTML" which is allowed
+// > : Used in raw HTML, also used to define blockquotes
+// # : Used for headings
+// + : Can be used for unordered lists
+// - : Can be used for unordered lists
+// ! : Used for images
+// ` : Used for code blocks
+var escapeRegex = regexp.MustCompile(`(` + `\\|\*|_|\[|\]|\(|\)|<|>|#|\+|-|!|` + "`" + `)`)
 
 func isChildOf(node *html.Node, name string) bool {
 	node = node.Parent
@@ -39,11 +55,43 @@ func attr(node *html.Node, key string) string {
 	return ""
 }
 
+// Gets the language of a code block based on the class
+// See: https://spec.commonmark.org/0.29/#example-112
+func langFromClass(node *html.Node) string {
+	if node.FirstChild == nil || strings.ToLower(node.FirstChild.Data) != "code" {
+		return ""
+	}
+
+	fChild := node.FirstChild
+	classes := strings.Fields(attr(fChild, "class"))
+	if len(classes) == 0 {
+		return ""
+	}
+
+	prefix := "language-"
+	for _, class := range classes {
+		if !strings.HasPrefix(class, prefix) {
+			continue
+		}
+		return strings.TrimPrefix(class, prefix)
+	}
+
+	return ""
+}
+
 func br(node *html.Node, w io.Writer, option *Option) {
 	node = node.PrevSibling
 	if node == nil {
 		return
 	}
+
+	// If trimspace is set to true, new lines will be ignored in nodes
+	// so we force a new line when using br()
+	if option.TrimSpace {
+		fmt.Fprint(w, "\n")
+		return
+	}
+
 	switch node.Type {
 	case html.TextNode:
 		text := strings.Trim(node.Data, " \t")
@@ -59,36 +107,44 @@ func br(node *html.Node, w io.Writer, option *Option) {
 }
 
 func table(node *html.Node, w io.Writer, option *Option) {
-	for tr := node.FirstChild; tr != nil; tr = tr.NextSibling {
-		if tr.Type == html.ElementNode && strings.ToLower(tr.Data) == "tbody" {
-			node = tr
-			break
+	var list []*html.Node // create a list not to mess up the loop
+
+	for tsection := node.FirstChild; tsection != nil; tsection = tsection.NextSibling {
+		// if the thead/tbody/tfoot is not explicitly set, it is implicitly set as tbody
+		if tsection.Type == html.ElementNode {
+			switch strings.ToLower(tsection.Data) {
+			case "thead", "tbody", "tfoot":
+				for tr := tsection.FirstChild; tr != nil; tr = tr.NextSibling {
+					if strings.TrimSpace(tr.Data) == "" {
+						continue
+					}
+					list = append(list, tr)
+				}
+			}
 		}
 	}
-	var header bool
+
+	// Now we create a new node, add all the <tr> to the node and convert it
+	newTableNode := new(html.Node)
+	for _, n := range list {
+		n.Parent.RemoveChild(n)
+		newTableNode.AppendChild(n)
+	}
+
+	tableRows(newTableNode, w, option)
+	fmt.Fprint(w, "\n")
+}
+
+func tableRows(node *html.Node, w io.Writer, option *Option) {
 	var rows [][]string
 	for tr := node.FirstChild; tr != nil; tr = tr.NextSibling {
 		if tr.Type != html.ElementNode || strings.ToLower(tr.Data) != "tr" {
 			continue
 		}
 		var cols []string
-		if !header {
-			for th := tr.FirstChild; th != nil; th = th.NextSibling {
-				if th.Type != html.ElementNode || strings.ToLower(th.Data) != "th" {
-					continue
-				}
-				var buf bytes.Buffer
-				walk(th, &buf, 0, option)
-				cols = append(cols, buf.String())
-			}
-			if len(cols) > 0 {
-				rows = append(rows, cols)
-				header = true
-				continue
-			}
-		}
 		for td := tr.FirstChild; td != nil; td = td.NextSibling {
-			if td.Type != html.ElementNode || strings.ToLower(td.Data) != "td" {
+			nodeType := strings.ToLower(td.Data)
+			if td.Type != html.ElementNode || (nodeType != "td" && nodeType != "th") {
 				continue
 			}
 			var buf bytes.Buffer
@@ -97,6 +153,7 @@ func table(node *html.Node, w io.Writer, option *Option) {
 		}
 		rows = append(rows, cols)
 	}
+
 	maxcol := 0
 	for _, cols := range rows {
 		if len(cols) > maxcol {
@@ -126,7 +183,7 @@ func table(node *html.Node, w io.Writer, option *Option) {
 			}
 		}
 		fmt.Fprint(w, "|\n")
-		if i == 0 && header {
+		if i == 0 {
 			for j := 0; j < maxcol; j++ {
 				fmt.Fprint(w, "|")
 				fmt.Fprint(w, strings.Repeat("-", widths[j]))
@@ -134,7 +191,6 @@ func table(node *html.Node, w io.Writer, option *Option) {
 			fmt.Fprint(w, "|\n")
 		}
 	}
-	fmt.Fprint(w, "\n")
 }
 
 var emptyElements = []string{
@@ -156,32 +212,7 @@ var emptyElements = []string{
 }
 
 func raw(node *html.Node, w io.Writer, option *Option) {
-	switch node.Type {
-	case html.ElementNode:
-		fmt.Fprintf(w, "<%s", node.Data)
-		for _, attr := range node.Attr {
-			fmt.Fprintf(w, " %s=%q", attr.Key, attr.Val)
-		}
-		found := false
-		tag := strings.ToLower(node.Data)
-		for _, e := range emptyElements {
-			if e == tag {
-				found = true
-				break
-			}
-		}
-		if found {
-			fmt.Fprint(w, "/>")
-		} else {
-			fmt.Fprint(w, ">")
-			for c := node.FirstChild; c != nil; c = c.NextSibling {
-				raw(c, w, option)
-			}
-			fmt.Fprintf(w, "</%s>", node.Data)
-		}
-	case html.TextNode:
-		fmt.Fprint(w, node.Data)
-	}
+	html.Render(w, node)
 }
 
 func bq(node *html.Node, w io.Writer, option *Option) {
@@ -204,13 +235,59 @@ func pre(node *html.Node, w io.Writer, option *Option) {
 	}
 }
 
-func walk(node *html.Node, w io.Writer, nest int, option *Option) {
-	if node.Type == html.TextNode {
-		if strings.TrimSpace(node.Data) != "" || node.Data == " " {
-			text := regexp.MustCompile(`[[:space:]][[:space:]]*`).ReplaceAllString(strings.Trim(node.Data, "\t\r\n"), " ")
-			fmt.Fprint(w, text)
+// In the spec, https://spec.commonmark.org/0.29/#delimiter-run
+// A  left-flanking delimiter run should not followed by Unicode whitespace
+// A  right-flanking delimiter run should not preceded by Unicode whitespace
+// This will wrap the delimiter (such as **) around the non-whitespace contents, but preserve the whitespace
+func aroundNonWhitespace(node *html.Node, w io.Writer, nest int, option *Option, before, after string) {
+	buf := &bytes.Buffer{}
+
+	walk(node, buf, nest, option)
+	s := buf.String()
+
+	// If the contents are simply whitespace, return without adding any delimiters
+	if strings.TrimSpace(s) == "" {
+		fmt.Fprint(w, s)
+		return
+	}
+
+	start := 0
+	for ; start < len(s); start++ {
+		c := s[start]
+		if !unicode.IsSpace(rune(c)) {
+			break
 		}
 	}
+
+	stop := len(s)
+	for ; stop > start; stop-- {
+		c := s[stop-1]
+		if !unicode.IsSpace(rune(c)) {
+			break
+		}
+	}
+
+	s = s[:start] + before + s[start:stop] + after + s[stop:]
+
+	fmt.Fprint(w, s)
+}
+
+func walk(node *html.Node, w io.Writer, nest int, option *Option) {
+	if node.Type == html.TextNode {
+		if option.TrimSpace && strings.TrimSpace(node.Data) == "" {
+			return
+		}
+
+		text := regexp.MustCompile(`[[:space:]][[:space:]]*`).ReplaceAllString(strings.Trim(node.Data, "\t\r\n"), " ")
+
+		if !option.doNotEscape {
+			text = escapeRegex.ReplaceAllStringFunc(text, func(str string) string {
+				return `\` + str
+			})
+		}
+		fmt.Fprint(w, text)
+	}
+
 	n := 0
 	for c := node.FirstChild; c != nil; c = c.NextSibling {
 		switch c.Type {
@@ -219,23 +296,29 @@ func walk(node *html.Node, w io.Writer, nest int, option *Option) {
 			fmt.Fprint(w, c.Data)
 			fmt.Fprint(w, "-->\n")
 		case html.ElementNode:
+			customWalk, ok := option.customRulesMap[strings.ToLower(c.Data)]
+			if ok {
+				customWalk(c, w, nest, option)
+				break
+			}
+
 			switch strings.ToLower(c.Data) {
 			case "a":
-				fmt.Fprint(w, "[")
-				walk(c, w, nest, option)
-				fmt.Fprint(w, "]("+attr(c, "href")+")")
+				// Links are invalid in markdown if the link text extends beyond a single line
+				// So we render the contents and strip any spaces
+				href := attr(c, "href")
+				end := fmt.Sprintf("](%s)", href)
+				title := attr(c, "title")
+				if title != "" {
+					end = fmt.Sprintf("](%s %q)", href, title)
+				}
+				aroundNonWhitespace(c, w, nest, option, "[", end)
 			case "b", "strong":
-				fmt.Fprint(w, "**")
-				walk(c, w, nest, option)
-				fmt.Fprint(w, "**")
+				aroundNonWhitespace(c, w, nest, option, "**", "**")
 			case "i", "em":
-				fmt.Fprint(w, "_")
-				walk(c, w, nest, option)
-				fmt.Fprint(w, "_")
-			case "del":
-				fmt.Fprint(w, "~~")
-				walk(c, w, nest, option)
-				fmt.Fprint(w, "~~")
+				aroundNonWhitespace(c, w, nest, option, "_", "_")
+			case "del", "s":
+				aroundNonWhitespace(c, w, nest, option, "~~", "~~")
 			case "br":
 				br(c, w, option)
 				fmt.Fprint(w, "\n\n")
@@ -252,17 +335,24 @@ func walk(node *html.Node, w io.Writer, nest int, option *Option) {
 				}
 			case "pre":
 				br(c, w, option)
+
+				clone := option.Clone()
+				clone.doNotEscape = true
+
 				var buf bytes.Buffer
-				pre(c, &buf, option)
-				var lang string
+				pre(c, &buf, clone)
+				inner := buf.String()
+
+				var lang string = langFromClass(c)
 				if option != nil && option.GuessLang != nil {
 					if guess, err := option.GuessLang(buf.String()); err == nil {
 						lang = guess
 					}
 				}
+
 				fmt.Fprint(w, "```"+lang+"\n")
-				fmt.Fprint(w, buf.String())
-				if !strings.HasSuffix(buf.String(), "\n") {
+				fmt.Fprint(w, inner)
+				if !strings.HasSuffix(inner, "\n") {
 					fmt.Fprint(w, "\n")
 				}
 				fmt.Fprint(w, "```\n\n")
@@ -299,34 +389,88 @@ func walk(node *html.Node, w io.Writer, nest int, option *Option) {
 				}
 			case "ul", "ol":
 				br(c, w, option)
+
+				var newOption = option.Clone()
+				newOption.TrimSpace = true
+
 				var buf bytes.Buffer
-				walk(c, &buf, 1, option)
-				if lines := strings.Split(strings.TrimSpace(buf.String()), "\n"); len(lines) > 0 {
+				walk(c, &buf, nest+1, newOption)
+
+				// Remove any empty lines in the list
+				if lines := strings.Split(buf.String(), "\n"); len(lines) > 0 {
 					for i, l := range lines {
+						if strings.TrimSpace(l) == "" {
+							continue
+						}
+
 						if i > 0 {
 							fmt.Fprint(w, "\n")
 						}
-						fmt.Fprint(w, strings.Repeat("    ", nest)+l)
+
+						fmt.Fprint(w, l)
 					}
 					fmt.Fprint(w, "\n")
+					if nest == 0 {
+						fmt.Fprint(w, "\n")
+					}
 				}
 			case "li":
 				br(c, w, option)
-				if isChildOf(c, "ul") {
-					fmt.Fprint(w, "* ")
-				} else if isChildOf(c, "ol") {
-					n++
-					fmt.Fprint(w, fmt.Sprintf("%d. ", n))
+
+				var buf bytes.Buffer
+				walk(c, &buf, 0, option)
+
+				markPrinted := false
+
+				for _, l := range strings.Split(buf.String(), "\n") {
+					if strings.TrimSpace(l) == "" {
+						continue
+					}
+					// if markPrinted {
+
+					// }
+					if markPrinted {
+						fmt.Fprint(w, "\n    ")
+					}
+
+					fmt.Fprint(w, strings.Repeat("    ", nest-1))
+
+					if !markPrinted {
+						if isChildOf(c, "ul") {
+							fmt.Fprint(w, "* ")
+						} else if isChildOf(c, "ol") {
+							n++
+							fmt.Fprint(w, fmt.Sprintf("%d. ", n))
+						}
+
+						markPrinted = true
+					}
+
+					fmt.Fprint(w, l)
 				}
-				walk(c, w, nest, option)
+
 				fmt.Fprint(w, "\n")
+
 			case "h1", "h2", "h3", "h4", "h5", "h6":
 				br(c, w, option)
 				fmt.Fprint(w, strings.Repeat("#", int(rune(c.Data[1])-rune('0')))+" ")
 				walk(c, w, nest, option)
 				fmt.Fprint(w, "\n\n")
 			case "img":
-				fmt.Fprint(w, "!["+attr(c, "alt")+"]("+attr(c, "src")+")")
+				src := attr(c, "src")
+				alt := attr(c, "alt")
+				title := attr(c, "title")
+
+				if src == "" {
+					break
+				}
+
+				full := fmt.Sprintf("![%s](%s)", alt, src)
+				if title != "" {
+					full = fmt.Sprintf("![%s](%s %q)", alt, src, title)
+				}
+
+				fmt.Fprintf(w, full)
 			case "hr":
 				br(c, w, option)
 				fmt.Fprint(w, "\n---\n\n")
@@ -346,22 +490,6 @@ func walk(node *html.Node, w io.Writer, nest int, option *Option) {
 					fmt.Fprint(w, "\n\n")
 				}
 			default:
-				if option == nil || option.CustomRules == nil {
-					walk(c, w, nest, option)
-					break
-				}
-
-				foundCustom := false
-				for _, cr := range option.CustomRules {
-					if tag, customWalk := cr.Rule(walk); strings.ToLower(c.Data) == tag {
-						customWalk(c, w, nest, option)
-						foundCustom = true
-					}
-				}
-
-				if foundCustom {
-					break
-				}
 				walk(c, w, nest, option)
 			}
 		default:
@@ -387,10 +515,24 @@ type CustomRule interface {
 
 // Option is optional information for Convert.
 type Option struct {
-	GuessLang   func(string) (string, error)
-	Script      bool
-	Style       bool
-	CustomRules []CustomRule
+	GuessLang      func(string) (string, error)
+	Script         bool
+	Style          bool
+	TrimSpace      bool
+	CustomRules    []CustomRule
+	doNotEscape    bool // Used to know if to escape certain characters
+	customRulesMap map[string]WalkFunc
+}
+
+// To make a copy of an option without changing the original
+func (o *Option) Clone() *Option {
+	if o == nil {
+		return nil
+	}
+
+	var clone Option
+	clone = *o
+	return &clone
 }
 
 // Convert convert HTML to Markdown. Read HTML from r and write to w.
@@ -399,6 +541,16 @@ func Convert(w io.Writer, r io.Reader, option *Option) error {
 	if err != nil {
 		return err
 	}
+	if option == nil {
+		option = &Option{}
+	}
+
+	option.customRulesMap = make(map[string]WalkFunc)
+	for _, cr := range option.CustomRules {
+		tag, customWalk := cr.Rule(walk)
+		option.customRulesMap[tag] = customWalk
+	}
+
 	walk(doc, w, 0, option)
 	fmt.Fprint(w, "\n")
 	return nil

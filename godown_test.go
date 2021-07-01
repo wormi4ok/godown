@@ -75,6 +75,22 @@ def do_something():
 	}
 }
 
+func TestGuessLangFromClass(t *testing.T) {
+	var buf bytes.Buffer
+	err := Convert(&buf, strings.NewReader(`
+<pre><code class="foo bar language-python">def do_something():
+  pass
+</code></pre>
+	`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "```python\ndef do_something():\n  pass\n```\n\n\n"
+	if buf.String() != want {
+		t.Errorf("\nwant:\n%s}}}\ngot:\n%s}}}\n", want, buf.String())
+	}
+}
+
 func TestGuessLangBq(t *testing.T) {
 	var buf bytes.Buffer
 	err := Convert(&buf, strings.NewReader(`
@@ -91,6 +107,75 @@ func TestGuessLangBq(t *testing.T) {
 	want := "```python\ndef do_something():\n  pass\n```\n\n\n"
 	if buf.String() != want {
 		t.Errorf("\nwant:\n%s}}}\ngot:\n%s}}}\n", want, buf.String())
+	}
+}
+
+func TestWhiteSpaceDelimiter(t *testing.T) {
+	// Test adding delimiters only on the inner contents
+	var buf bytes.Buffer
+	err := Convert(&buf, strings.NewReader(
+		`<strong> foo bar </strong>`,
+	), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := " **foo bar** \n"
+	if buf.String() != want {
+		t.Errorf("\nwant:\n%q}}}\ngot:\n%q}}}\n", want, buf.String())
+	}
+
+	// Test that no delimiters are added if the contents is all whitespace
+	var buf2 bytes.Buffer
+	err = Convert(&buf2, strings.NewReader(
+		`Hello<strong>  </strong>hi`,
+	), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "Hello hi\n"
+	if buf2.String() != want {
+		t.Errorf("\nwant:\n%q}}}\ngot:\n%q}}}\n", want, buf2.String())
+	}
+
+	// Test that line breaks are preserved even if delimiters are not added
+	var buf3 bytes.Buffer
+	err = Convert(&buf3, strings.NewReader(
+		`<strong><br></strong>`,
+	), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = "\n\n\n"
+	if buf3.String() != want {
+		t.Errorf("\nwant:\n%q}}}\ngot:\n%q}}}\n", want, buf3.String())
+	}
+}
+
+func TestEmptyImageSrc(t *testing.T) {
+	var buf bytes.Buffer
+	err := Convert(&buf, strings.NewReader(
+		`<img src="" alt="foo bar">`,
+	), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "\n"
+	if buf.String() != want {
+		t.Errorf("\nwant:\n%q}}}\ngot:\n%q}}}\n", want, buf.String())
+	}
+}
+
+func TestBlockLink(t *testing.T) {
+	var buf bytes.Buffer
+	err := Convert(&buf, strings.NewReader(
+		`<a href="https://example.org"><img src="https://example.com/img" alt="foo bar"><div></div></a>`,
+	), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[![foo bar](https://example.com/img)](https://example.org)\n\n"
+	if buf.String() != want {
+		t.Errorf("\nwant:\n%q}}}\ngot:\n%q}}}\n", want, buf.String())
 	}
 }
 
@@ -177,6 +262,33 @@ func TestCustomRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `_here is the text in custom tag_
+`
+	if buf.String() != want {
+		t.Errorf("\nwant:\n%s}}}\ngot:\n%s}}}\n", want, buf.String())
+	}
+}
+
+type TestOverwriteRule struct{}
+
+func (r *TestOverwriteRule) Rule(next WalkFunc) (string, WalkFunc) {
+	return "div", func(node *html.Node, w io.Writer, nest int, option *Option) {
+		fmt.Fprint(w, "___")
+		next(node, w, nest, option)
+		fmt.Fprint(w, "___")
+	}
+}
+
+func TestCustomOverwriteRules(t *testing.T) {
+	var buf bytes.Buffer
+	err := Convert(&buf, strings.NewReader(`
+<div>here is the text in custom tag</div>
+	`), &Option{
+		CustomRules: []CustomRule{&TestOverwriteRule{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `___here is the text in custom tag___
 `
 	if buf.String() != want {
 		t.Errorf("\nwant:\n%s}}}\ngot:\n%s}}}\n", want, buf.String())
