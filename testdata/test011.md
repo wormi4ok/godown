@@ -4,5 +4,5 @@ foo bar
 
 bar baz
 
-**bold** _italic_ normal
+ **bold** _italic_ normal
 

@@ -426,14 +426,14 @@ func walk(node *html.Node, w io.Writer, nest int, option *Option) {
 					if strings.TrimSpace(l) == "" {
 						continue
 					}
-					// if markPrinted {
 
-					// }
 					if markPrinted {
 						fmt.Fprint(w, "\n    ")
 					}
 
-					fmt.Fprint(w, strings.Repeat("    ", nest-1))
+					if nest > 0 {
+						fmt.Fprint(w, strings.Repeat("    ", nest-1))
+					}
 
 					if !markPrinted {
 						if isChildOf(c, "ul") {
